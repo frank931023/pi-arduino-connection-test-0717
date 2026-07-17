@@ -103,7 +103,7 @@ git pull && sudo docker compose up -d --build
 ### 找出 Arduino 的序列埠
 
 ```bash
-ls -la /dev/tty*
+ls -l /dev/serial/by-id/
 ```
 
 - Arduino Nano（CH340 晶片）通常是 `/dev/ttyUSB0`
@@ -409,3 +409,4 @@ sudo ufw allow 5000
 ## 許可證
 
 MIT
+sudo usermod -aG docker $USER
