@@ -1,0 +1,16 @@
+version: '3.8'
+
+services:
+  web-controller:
+    build: .
+    container_name: pi-arduino-connection-test-0717
+    ports:
+      - "5000:5000"
+    # 自動重啟設定：即使當機、Ctrl+C、或者 Pi 重開機，都會自動重啟 Flask
+    restart: unless-stopped
+    # 關鍵：將實體的 Arduino Nano USB 映射進容器
+    devices:
+      - "/dev/ttyUSB0:/dev/ttyUSB0"
+    # 如果你的 Arduino 在 Pi 上被認成 ttyACM0，請改成下方這行：
+    # devices:
+    #   - "/dev/ttyACM0:/dev/ttyACM0"

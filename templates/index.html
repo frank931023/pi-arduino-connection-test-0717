@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Arduino LED 控制板</title>
+    <!-- 引入 Tailwind CSS 讓介面變美觀 -->
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-900 text-white min-h-screen flex items-center justify-center">
+
+    <div class="bg-slate-800 p-8 rounded-2xl shadow-2xl w-full max-w-md border border-slate-700">
+        <h1 class="text-2xl font-bold text-center mb-6 text-cyan-400">💡 Arduino LED 儀表板</h1>
+
+        <!-- 狀態顯示與 PING 測試 -->
+        <div class="flex justify-between items-center bg-slate-900 p-4 rounded-lg mb-6">
+            <span class="text-sm text-gray-400">硬體通訊測試</span>
+            <button onclick="testPing()" class="px-3 py-1 bg-cyan-600 hover:bg-cyan-500 rounded text-xs transition-colors">
+                PING
+            </button>
+        </div>
+
+        <!-- 亮度數值顯示 -->
+        <div class="text-center mb-6">
+            <span class="text-sm text-gray-400 block">目前設定亮度</span>
+            <span id="brightness-val" class="text-5xl font-extrabold text-cyan-400">0</span>
+            <span class="text-gray-400">/ 255</span>
+        </div>
+
+        <!-- 調整滑桿 -->
+        <div class="mb-8">
+            <label for="brightness-slider" class="block text-sm text-gray-400 mb-2">亮度旋鈕 (0 - 255)</label>
+            <input 
+                type="range" 
+                id="brightness-slider" 
+                min="0" 
+                max="255" 
+                value="0" 
+                class="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-cyan-400"
+                oninput="updateBrightness(this.value)"
+            >
+        </div>
+
+        <!-- 快速控制按鈕 -->
+        <div class="grid grid-cols-2 gap-4">
+            <button onclick="quickSet(0)" class="py-3 bg-red-600 hover:bg-red-500 font-semibold rounded-xl shadow-md transition-all">
+                🔴 全關 (0)
+            </button>
+            <button onclick="quickSet(255)" class="py-3 bg-green-600 hover:bg-green-500 font-semibold rounded-xl shadow-md transition-all">
+                🟢 全開 (255)
+            </button>
+        </div>
+        
+        <!-- 系統回應 log -->
+        <p id="log" class="text-center text-xs text-slate-500 mt-6 h-4">等待操作...</p>
+    </div>
+
+    <script>
+        const logEl = document.getElementById('log');
+        const brightnessValEl = document.getElementById('brightness-val');
+        const sliderEl = document.getElementById('brightness-slider');
+
+        let lastSentTime = 0;
+
+        // 向後端發送亮度請求
+        async function sendBrightness(value) {
+            try {
+                const res = await fetch('/api/set_brightness', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ value: parseInt(value) })
+                });
+                const data = await res.json();
+                if (data.status === 'success') {
+                    logEl.innerText = `Arduino 回傳: ${data.arduino_response}`;
+                }
+            } catch (err) {
+                logEl.innerText = '連線失敗，請檢查 Pi 狀態';
+            }
+        }
+
+        // 滑桿實時更新（限制每 50ms 最多發送一次，避免序列埠塞車）
+        function updateBrightness(value) {
+            brightnessValEl.innerText = value;
+            const now = Date.now();
+            if (now - lastSentTime > 50) {
+                sendBrightness(value);
+                lastSentTime = now;
+            }
+        }
+
+        // 快速切換
+        function quickSet(value) {
+            sliderEl.value = value;
+            brightnessValEl.innerText = value;
+            sendBrightness(value);
+        }
+
+        // 測試連線
+        async function testPing() {
+            logEl.innerText = 'PINGing...';
+            try {
+                const res = await fetch('/api/ping');
+                const data = await res.json();
+                logEl.innerText = `回應: ${data.response}`;
+            } catch (err) {
+                logEl.innerText = 'PING 失敗';
+            }
+        }
+    </script>
+</body>
+</html>
