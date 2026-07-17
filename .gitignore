@@ -1,0 +1,7 @@
+# 每台 Pi 的專屬設定，不進版控（範本見 .env.example）
+.env
+
+__pycache__/
+*.py[cod]
+venv/
+.venv/

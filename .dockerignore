@@ -1,0 +1,13 @@
+# Dockerfile 用的是 COPY . .，這裡列的東西不會被打包進 image
+
+# 設定必須留在 image 外面（透過 compose / --env-file 在執行期注入），
+# 否則推到 registry 的 image 會帶著某一台 Pi 的 .env
+.env
+
+.git
+.gitignore
+README.md
+__pycache__/
+*.py[cod]
+venv/
+.venv/
