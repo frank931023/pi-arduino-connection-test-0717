@@ -27,25 +27,50 @@ Arduino (analogWrite 控制 LED)
 - USB 線連接 Pi 和 Arduino
 - Pi 與 PC 在同一個區域網路
 
-### 安裝（Docker，推薦）
+### 步驟 1：準備 Pi 環境（每台新的 Pi 第一次做一次）
+
+這一步決定 Docker 容器能不能正常上網。**照順序做完並通過最後的驗證再往下**，可以避免後面 build 時卡在「pip 裝不了套件」的網路坑。
 
 ```bash
-# 前置：安裝 Docker
 sudo apt update
-sudo apt install -y docker.io docker-compose-plugin
 
-# 1. 取得程式碼
+# 1a. 安裝 iptables —— Docker 靠它建立容器對外的網路（NAT）規則。
+#     Raspberry Pi OS trixie / Debian 13 預設可能只有 nftables、缺 iptables，
+#     少了它 Docker 的容器會完全連不出網路。
+sudo apt install -y iptables
+
+# 1b. 用官方腳本安裝最新版 Docker。
+#     不要用 apt 的 docker.io（trixie 上版本偏舊，nftables 環境容易出容器網路問題），
+#     官方腳本裝的是最新穩定版，並附帶正確的 systemd 設定。
+curl -fsSL https://get.docker.com -o get-docker.sh
+sudo sh get-docker.sh
+
+# 1c.（選用）把自己加進 docker 群組，之後不用每個指令都 sudo。登出再登入才生效。
+sudo usermod -aG docker $USER
+
+# 1d. 驗證容器網路正常 —— 這步通過再往下。
+#     會印出一個 IP（如 151.101.0.223）代表容器能解析並連到外網。
+docker run --rm python:3.11-slim python -c "import socket; print(socket.gethostbyname('pypi.org'))"
+```
+
+> 若 1d 沒印出 IP、而是 `Temporary failure in name resolution` 或卡住，
+> 代表容器網路不通，跳到「故障排除 → 容器連不上網路 / build 裝不了套件」照做，修好再回來。
+
+### 步驟 2：部署應用
+
+```bash
+# 2a. 取得程式碼
 git clone <這個 repo>
 cd pi-arduino-connection-test-0717
 
-# 2. 建立這台 Pi 的專屬設定
+# 2b. 建立這台 Pi 的專屬設定
 cp .env.example .env
 nano .env                 # 至少要改 PI_ID
 
-# 3. 啟動
+# 2c. 啟動（第一次會自動 build image）
 sudo docker compose up -d
 
-# 查看日誌（確認 Arduino 有連上）
+# 2d. 查看日誌（確認 Arduino 有連上）
 sudo docker compose logs -f
 ```
 
@@ -56,7 +81,9 @@ sudo docker compose logs -f
 [pi-001] Arduino Connected!
 ```
 
-### 安裝（不用 Docker）
+### 替代方案：不用 Docker 直接執行
+
+不想用 Docker 的話，跳過上面步驟 1、2，直接跑：
 
 ```bash
 pip3 install -r requirements.txt
@@ -257,7 +284,7 @@ Content-Type: application/json
 
 ## 部署到多台 Pi
 
-每台的步驟完全一樣，只有 `.env` 內容不同：
+每台的步驟完全一樣，只有 `.env` 內容不同。**每台新 Pi 都要先做一次「步驟 1：準備 Pi 環境」**（裝 iptables + 官方 Docker），再跑下面的部署：
 
 ```bash
 git clone <這個 repo> && cd pi-arduino-connection-test-0717
@@ -388,6 +415,103 @@ sudo ufw status             # 防火牆有擋嗎
 sudo ufw allow 5000
 ```
 
+### 容器連不上網路 / build 裝不了套件
+
+**症狀**——`docker compose build` 卡在 `pip install`，retry 五次後失敗：
+
+```
+WARNING: Retrying ... [Errno -3] Temporary failure in name resolution
+ERROR: No matching distribution found for Flask==2.3.3
+```
+
+照「步驟 1」裝好環境的新 Pi 不會遇到。**會遇到的多半是之前用舊方式(`apt install docker.io`)裝過、環境沒收乾淨的機器**。這不是 DNS 設定或程式碼問題，而是**容器連不出網路**——`Temporary failure in name resolution` 只是表象，容器連 DNS 查詢的封包都送不出去。
+
+**先分辨是「容器網路」還是「純 DNS」**（`python:3.11-slim` build 時就會下載，測試很快）：
+
+```bash
+# 測 1:容器能不能把域名解析成 IP
+docker run --rm python:3.11-slim python -c "import socket; print(socket.gethostbyname('pypi.org'))"
+
+# 測 2:繞過 DNS,直接用 IP 連(分辨是 NAT/路由 還是 DNS)
+docker run --rm python:3.11-slim python -c "import socket; socket.create_connection(('151.101.0.223',443),5); print('IP OK')"
+```
+
+- 測 2 **timeout** → 容器封包出不去，是 **NAT/路由問題**，用下面 A 修。
+- 測 2 印出 `IP OK`、只有測 1 失敗 → 是**純 DNS 問題**，用下面 B 修。
+
+#### A. NAT 壞掉:`iptables` 缺失 → dockerd 帶著 `--iptables=false` 啟動
+
+**因果鏈**（Raspberry Pi OS trixie / Debian 13 實際踩過）：系統只有 `nftables`、缺 `iptables` 套件 → Docker 少了它會啟動失敗，於是有人在 systemd unit 加上 `--iptables=false` 硬讓它能開機 → 但這代表 **Docker 不建立容器的對外 NAT(MASQUERADE)規則** → 容器封包出不去。（`docker pull` 卻正常，因為 pull 是 daemon 走**主機網路**、不經過容器 NAT——這就是「主機能上網、容器不行」的來源。）
+
+**確認：**
+
+```bash
+apt-cache policy iptables                  # 壞掉時是 Installed/Candidate: (none)
+ps aux | grep dockerd | grep -v grep       # 看 dockerd 是否帶著 --iptables=false
+sudo iptables -t nat -L POSTROUTING -n     # 壞掉時 POSTROUTING 是空的,沒有 MASQUERADE
+cat /proc/sys/net/ipv4/ip_forward          # 要是 1;若為 0:sudo sysctl -w net.ipv4.ip_forward=1
+```
+
+**修復（依序執行）：**
+
+```bash
+# 1. 修 apt 索引(iptables 顯示 no candidate 時多半是索引損壞)並裝回 iptables
+sudo rm -rf /var/lib/apt/lists/*
+sudo apt-get update
+sudo apt-get install -y iptables
+apt-cache policy iptables                  # 確認 Candidate 有版本了(如 1.8.11-2)
+
+# 2. 升級 Docker 到官方最新版(舊版 27.x 在 trixie/nftables 上問題較多)
+curl -fsSL https://get.docker.com -o get-docker.sh
+sudo sh get-docker.sh
+
+# 3. 移除人為加的 --iptables=false,讓官方預設 unit 接手
+sudo mv /etc/systemd/system/docker.service /etc/systemd/system/docker.service.disabled
+
+# 4. 重載 + 重啟 daemon(同時換上新引擎、重讀 iptables、重建 NAT 規則)
+sudo systemctl daemon-reload
+sudo systemctl restart docker
+```
+
+> 若第 3 步 `/etc/systemd/system/docker.service` 是你要保留的自訂設定（不是只為了那個 flag），
+> 就別整份移走，改用手術式移除參數：
+> ```bash
+> sudo sed -i 's/ --iptables=false//g' /etc/systemd/system/docker.service
+> sudo systemctl daemon-reload && sudo systemctl restart docker
+> ```
+
+**驗證：**
+
+```bash
+docker version                                       # Server > Engine > Version 應為 29.x
+ps aux | grep dockerd | grep -v grep                 # dockerd 後面不再有 --iptables=false
+sudo iptables -t nat -L POSTROUTING -n               # 這次會出現 MASQUERADE 那行
+docker run --rm python:3.11-slim python -c "import socket; print(socket.gethostbyname('pypi.org'))"
+```
+
+最後印出 IP 就代表通了，重新 `docker compose build --no-cache && docker compose up -d`。
+
+#### B. 純 DNS 問題(公司/內網環境)
+
+容器的上游 DNS 是從主機 `/etc/resolv.conf` 抄的。若測 2 是 `IP OK`、只有解析不到，在 `/etc/docker/daemon.json` 指定內網 DNS：
+
+```bash
+cat /etc/resolv.conf                 # 先看主機用的內網 DNS,例:172.17.112.6 / 172.19.31.1
+sudo nano /etc/docker/daemon.json
+```
+
+```json
+{
+  "dns": ["172.17.112.6", "172.19.31.1"]
+}
+```
+
+```bash
+sudo systemctl restart docker
+```
+
+> ⚠️ 內網環境**不要**填 `8.8.8.8`(Google DNS),公司防火牆常會擋外部 DNS,反而更慘。填主機 `/etc/resolv.conf` 裡實際在用的那組。
+
 ---
 
 ## 設計備註
@@ -409,4 +533,3 @@ sudo ufw allow 5000
 ## 許可證
 
 MIT
-sudo usermod -aG docker $USER
