@@ -20,3 +20,4 @@ services:
       - PI_ID=${PI_ID:-pi-001}
       - SERIAL_PORT=${SERIAL_PORT:-/dev/ttyUSB0}
       - BAUD_RATE=${BAUD_RATE:-115200}
+      - COMMAND_TIMEOUT=${COMMAND_TIMEOUT:-130}
