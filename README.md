@@ -326,16 +326,15 @@ Content-Type: application/json
 | `GET /api/status` 的 `arduino_error` 值 | `NO_RESPONSE_FROM_ARDUINO` | `TIMEOUT_NO_TERMINAL`，另外新增 `DESYNC_RECOVERY_TIMEOUT` | 如果呼叫端用字串比對這個值來決定顯示文字，要更新對照表 |
 | `GET /api/status` | 只有 `arduino_status`/`arduino_error` | 多了 `rig_name`（連線成功時）、`heartbeat`（剛好收到心跳時） | 沒用到的話不影響，但可以拿來加強顯示（例如顯示天車 IDLE/BUSY 狀態） |
 
-**目前這個 repo 同一台機器上，`../pc-led-controller` 專案就是會直接受影響的呼叫端**：
-它的 `/api/pi/<id>/brightness`、`/api/pi/<id>/command`、`/api/pi/<id>/test` 分別轉發到這裡的
-`/api/set_brightness`、`/api/command`、`/api/ping`。它的後端是直接把 Pi 的整包 JSON 包成
-`pi_response` 原樣轉發，不會因為欄位改變而直接 500，但：
+**目前這個 repo 同一台機器上，`../pc-led-controller` 專案就是直接受影響的呼叫端**：
+它的 `/api/pi/<id>/command`、`/api/pi/<id>/test` 分別轉發到這裡的 `/api/command`、`/api/ping`。
+它的後端是直接把 Pi 的整包 JSON 包成 `pi_response` 原樣轉發，不會因為欄位改變而直接 500。
 
-1. **亮度滑桿功能會整個壞掉**（呼叫的 `/api/set_brightness` 已經不存在了）。
-2. 更根本的問題是 **UI 概念本身跟天車對不上**——那邊整個前端是圍繞「單一亮度滑桿（0–255）」
-   設計的，但天車需要的是「X/Y/Z 軸位置、旋轉角度、傾角」四個獨立維度，外加校正/歸位
-   這種一次性操作。這不是改欄位名稱能解決的，是需要重新設計控制介面（例如四個滑桿/輸入框
-   分別對應 X、Y、Z、旋轉，再加校正/歸位按鈕），不只是把 `brightness` 換個名字。
+> **狀態：已對接完成。** `pc-led-controller` 已經移除亮度滑桿與 `/api/pi/<id>/brightness`
+> （原本轉發到這裡已經 404 的 `/api/set_brightness`），改成一整排對應本文件「指令表」的
+> 天車指令按鈕（X/Y/Z 校正／歸位／查詢位置／移動＋旋轉＋傾角），每顆按鈕旁邊都標示對照
+> LED 模擬版韌體的預期燈號反應，並正確處理 `arduino_response` 是陣列、`arduino_result`
+> 分 `DONE`/`ERR` 這些新格式。細節見 `../pc-led-controller/README.md`。
 
 ---
 
