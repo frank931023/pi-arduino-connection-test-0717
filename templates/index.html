@@ -1,112 +1,76 @@
-<!DOCTYPE html>
-<html lang="zh-TW">
+<!doctype html>
+<html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Arduino LED 控制板</title>
-    <!-- 引入 Tailwind CSS 讓介面變美觀 -->
-    <script src="https://cdn.tailwindcss.com"></script>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ pi_id }} · Pi Controller</title>
+<!-- Same design as the PC Motion Control Center (style.css is a copy of its stylesheet) -->
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}?v={{ v }}">
+<style>
+  .kv { display:flex; justify-content:space-between; gap:10px; padding:7px 2px; font-size:12px; }
+  .kv + .kv { border-top:1px solid var(--line); }
+  .kv span { color:var(--muted); }
+  .kv b { font-weight:600; font-variant-numeric:tabular-nums; text-align:right; word-break:break-all; }
+  .kv code { font-family:Consolas,"Cascadia Mono",monospace; font-size:12px; }
+  .note { font-size:11px; color:var(--faint); line-height:1.6; margin:10px 0 0; }
+</style>
 </head>
-<body class="bg-slate-900 text-white min-h-screen flex items-center justify-center">
+<body>
+<div class="shell">
+  <nav class="nav">
+    <div class="logo">P</div>
+    <div class="sp"></div>
+    <div class="st" id="nav-dot" title="Arduino connection"></div>
+  </nav>
 
-    <div class="bg-slate-800 p-8 rounded-2xl shadow-2xl w-full max-w-md border border-slate-700">
-        <h1 class="text-2xl font-bold text-center mb-6 text-cyan-400">💡 Arduino LED 儀表板</h1>
+  <div class="work">
+    <!-- This Pi -->
+    <div class="panel">
+      <div class="top">
+        <h1>{{ pi_id }}</h1>
+        <span class="sp"></span>
+        <span class="badge checking" id="badge">Checking</span>
+      </div>
 
-        <!-- 狀態顯示與 PING 測試 -->
-        <div class="flex justify-between items-center bg-slate-900 p-4 rounded-lg mb-6">
-            <span class="text-sm text-gray-400">硬體通訊測試</span>
-            <button onclick="testPing()" class="px-3 py-1 bg-cyan-600 hover:bg-cyan-500 rounded text-xs transition-colors">
-                PING
-            </button>
-        </div>
+      <h2>Arduino</h2>
+      <div class="kv"><span>Status</span><b id="s-status">–</b></div>
+      <div class="kv"><span>Rig name</span><b id="s-rig">–</b></div>
+      <div class="kv"><span>Heartbeat</span><b id="s-hb">–</b></div>
+      <div class="kv"><span>Last error</span><b id="s-err">–</b></div>
 
-        <!-- 亮度數值顯示 -->
-        <div class="text-center mb-6">
-            <span class="text-sm text-gray-400 block">目前設定亮度</span>
-            <span id="brightness-val" class="text-5xl font-extrabold text-cyan-400">0</span>
-            <span class="text-gray-400">/ 255</span>
-        </div>
+      <h2 style="margin-top:18px">Settings</h2>
+      <div class="kv"><span>Serial port</span><b><code>{{ serial_port }}</code></b></div>
+      <div class="kv"><span>Baud rate</span><b>{{ baud_rate }}</b></div>
+      <div class="kv"><span>Command timeout</span><b>{{ command_timeout|int }} s</b></div>
+      <div class="kv"><span>App version</span><b><code>{{ app_version }}</code></b></div>
 
-        <!-- 調整滑桿 -->
-        <div class="mb-8">
-            <label for="brightness-slider" class="block text-sm text-gray-400 mb-2">亮度旋鈕 (0 - 255)</label>
-            <input 
-                type="range" 
-                id="brightness-slider" 
-                min="0" 
-                max="255" 
-                value="0" 
-                class="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-cyan-400"
-                oninput="updateBrightness(this.value)"
-            >
-        </div>
+      <p class="note">
+        This page talks to this Pi only. For everyday use, open the Motion Control Center on the PC —
+        it manages every Pi and prevents two commands from running on the same Pi at once.
+      </p>
 
-        <!-- 快速控制按鈕 -->
-        <div class="grid grid-cols-2 gap-4">
-            <button onclick="quickSet(0)" class="py-3 bg-red-600 hover:bg-red-500 font-semibold rounded-xl shadow-md transition-all">
-                🔴 全關 (0)
-            </button>
-            <button onclick="quickSet(255)" class="py-3 bg-green-600 hover:bg-green-500 font-semibold rounded-xl shadow-md transition-all">
-                🟢 全開 (255)
-            </button>
-        </div>
-        
-        <!-- 系統回應 log -->
-        <p id="log" class="text-center text-xs text-slate-500 mt-6 h-4">等待操作...</p>
+      <div class="grow"></div>
+      <div class="foot">
+        <button id="btn-refresh" data-action="refresh">Refresh status</button>
+        <button id="btn-ping" data-action="ping">Ping Arduino</button>
+      </div>
     </div>
 
-    <script>
-        const logEl = document.getElementById('log');
-        const brightnessValEl = document.getElementById('brightness-val');
-        const sliderEl = document.getElementById('brightness-slider');
+    <!-- Controls -->
+    <div class="panel" id="detail">
+      <h2>Controls</h2>
+      <div class="grow"><div class="groups" id="groups"></div></div>
+      <div class="custom">
+        <input type="text" id="custom" placeholder="Custom command" maxlength="64" data-enter="custom-send">
+        <button class="cmd" id="custom-send" data-action="custom">Send</button>
+      </div>
+      <div class="hist" id="hist"></div>
+    </div>
+  </div>
+</div>
 
-        let lastSentTime = 0;
+<div id="toasts"></div>
 
-        // 向後端發送亮度請求
-        async function sendBrightness(value) {
-            try {
-                const res = await fetch('/api/set_brightness', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ value: parseInt(value) })
-                });
-                const data = await res.json();
-                if (data.status === 'success') {
-                    logEl.innerText = `Arduino 回傳: ${data.arduino_response}`;
-                }
-            } catch (err) {
-                logEl.innerText = '連線失敗，請檢查 Pi 狀態';
-            }
-        }
-
-        // 滑桿實時更新（限制每 50ms 最多發送一次，避免序列埠塞車）
-        function updateBrightness(value) {
-            brightnessValEl.innerText = value;
-            const now = Date.now();
-            if (now - lastSentTime > 50) {
-                sendBrightness(value);
-                lastSentTime = now;
-            }
-        }
-
-        // 快速切換
-        function quickSet(value) {
-            sliderEl.value = value;
-            brightnessValEl.innerText = value;
-            sendBrightness(value);
-        }
-
-        // 測試連線
-        async function testPing() {
-            logEl.innerText = 'PINGing...';
-            try {
-                const res = await fetch('/api/ping');
-                const data = await res.json();
-                logEl.innerText = `回應: ${data.response}`;
-            } catch (err) {
-                logEl.innerText = 'PING 失敗';
-            }
-        }
-    </script>
+<script src="{{ url_for('static', filename='app.js') }}?v={{ v }}"></script>
 </body>
 </html>

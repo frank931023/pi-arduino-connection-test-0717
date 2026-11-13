@@ -11,3 +11,9 @@ __pycache__/
 *.py[cod]
 venv/
 .venv/
+
+beszel_agent_data/
+
+tests/
+pytest.ini
+.pytest_cache/

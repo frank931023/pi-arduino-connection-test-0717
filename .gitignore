@@ -5,3 +5,7 @@ __pycache__/
 *.py[cod]
 venv/
 .venv/
+
+# Beszel agent 的執行期資料（指紋等）
+beszel_agent_data/
+.pytest_cache/

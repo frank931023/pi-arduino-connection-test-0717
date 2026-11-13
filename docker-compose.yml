@@ -1,18 +1,28 @@
 services:
   arduino-controller:
-    build: .
+    # PI_IMAGE 有設（例如 ghcr.io/<owner>/pi-arduino-connection-test-0717:main）就用預先建好的 image，
+    # 先 docker compose pull 再 up；沒設就在這台 Pi 上 build。
+    image: ${PI_IMAGE:-pi-arduino-controller:local}
+    build:
+      context: .
+      args:
+        APP_VERSION: ${APP_VERSION:-dev}
     container_name: pi-arduino-controller
-    # 自動重啟設定：即使當機、Ctrl+C、或者 Pi 重開機，都會自動重啟 Flask
+    # 自動重啟設定：即使當機、Ctrl+C、或者 Pi 重開機，都會自動重啟
     restart: unless-stopped
 
     ports:
       - "${HOST_PORT:-5000}:5000"
 
-    # 關鍵：將實體的 Arduino USB 映射進容器。
-    # 用 SERIAL_PORT 同時決定「映射哪個裝置」和「程式開哪個埠」，
-    # 避免只改到一邊（ttyUSB0 / ttyACM0 的差異只需在 .env 改一次）。
-    devices:
-      - "${SERIAL_PORT:-/dev/ttyUSB0}:${SERIAL_PORT:-/dev/ttyUSB0}"
+    # 掛整個 /dev，而不是用 devices: 映射單一裝置：
+    #   - devices: 指定的裝置不存在時容器根本起不來（沒接 Arduino 就連網頁都看不到）
+    #   - Arduino 拔掉重插、或編號從 ttyUSB0 變成 ttyUSB1 時，devices: 必須重建容器
+    # device_cgroup_rules 只放行 USB 序列埠（188 = ttyUSB*，166 = ttyACM*），其他裝置仍然打不開。
+    volumes:
+      - /dev:/dev
+    device_cgroup_rules:
+      - "c 188:* rmw"
+      - "c 166:* rmw"
 
     # 每台 Pi 的專屬設定放在 .env（見 .env.example），不進版控，
     # 所以這個檔案在每台 Pi 上都一模一樣，git pull 不會衝突。
@@ -21,3 +31,33 @@ services:
       - SERIAL_PORT=${SERIAL_PORT:-/dev/ttyUSB0}
       - BAUD_RATE=${BAUD_RATE:-115200}
       - COMMAND_TIMEOUT=${COMMAND_TIMEOUT:-130}
+      - MAX_COMMAND_TIMEOUT=${MAX_COMMAND_TIMEOUT:-300}
+
+  # ── 選用：Pi 健康監控（Beszel agent）─────────────────────────
+  # 回報這台 Pi 的 CPU / 記憶體 / 磁碟 / 溫度給 PC 端的 Beszel hub，
+  # PC 控制中心的網頁就能看到每台 Pi 的狀態（hub 跟控制中心一起在 PC 上啟動）。
+  #
+  # 預設不啟動。要啟用，在 .env 加上 PC 控制中心「⚙ Monitoring setup」給的四行：
+  #   COMPOSE_PROFILES=monitoring   ← 讓 docker compose up -d 一併啟動這個服務
+  #   BESZEL_HUB_URL / BESZEL_KEY / BESZEL_TOKEN
+  # 用 profile 而不是直接啟動：沒設定 KEY 的 Pi 上 agent 會一直崩潰重啟。
+  beszel-agent:
+    image: henrygd/beszel-agent:0.21.1
+    container_name: beszel-agent
+    restart: unless-stopped
+    profiles: ["monitoring"]
+    # 要用 host 網路才讀得到 Pi 本身（而不是容器）的網路流量
+    network_mode: host
+    volumes:
+      - ./beszel_agent_data:/var/lib/beszel-agent
+      # 唯讀：讓 Beszel 順便顯示這台 Pi 上各個容器（例如 Arduino 控制服務）的資源用量
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      - LISTEN=45876
+      # agent 主動用 WebSocket 連到 hub，所以 PC 不需要連進 Pi，只要 Pi 連得到 PC 的 8090
+      - HUB_URL=${BESZEL_HUB_URL:-}
+      - KEY=${BESZEL_KEY:-}
+      - TOKEN=${BESZEL_TOKEN:-}
+      # 在 Beszel 裡的名稱 = PI_ID。PC 控制中心靠這個名稱對應到「裝置 ID」，
+      # 所以 PI_ID 要跟 PC 端新增裝置時填的 Device ID 一樣。
+      - SYSTEM_NAME=${PI_ID:-pi-001}

@@ -3,21 +3,50 @@
 Raspberry Pi 側的 Flask 應用：接收來自 PC / 網頁控制端的 HTTP 指令，透過 USB 序列埠轉發給
 Arduino，控制天車（人工嘴）的三軸滑台（X/Y/Z）、旋轉與傾角機構。
 
-這個應用**不提供網頁介面**，純粹是 Arduino 的 API 端點，是網頁/PC 控制端跟實體天車之間
-唯一的橋樑。**這份文件是給負責網頁/PC 控制端開發的人看的**——你不需要知道序列埠怎麼開、
+這個應用主要是 Arduino 的 API 端點，是網頁/PC 控制端跟實體機構之間唯一的橋樑。
+
+另外在 **`http://<Pi 的 IP>:5000/`** 有一個**本機網頁**（英文介面，風格同 PC 的 Motion Control Center），
+可以單獨檢查這一台 Pi：Arduino 連線狀態、機台名稱、最近一次心跳、序列埠設定，並直接送出所有指令
+（各軸 Calibrate／Home／Position／Move、Rotation、Tilt、LED Test、自訂指令），結果記在下方紀錄。
+日常操作請用 PC 控制中心——它管理所有 Pi。**同一台 Pi 同時只跑一個指令**，不論指令來自 PC、本機網頁
+還是腳本：前一個還沒結束時，後來的會立刻收到 `409`，PC 端顯示 **Busy**。
+
+**沒接 Arduino 也能啟動**：容器、API、本機網頁照常運作，狀態顯示 No Arduino；插上 Arduino 後
+下一個請求就會自動連上，不需要重啟或重建容器。
+
+**這份文件是給負責網頁/PC 控制端開發的人看的**——你不需要知道序列埠怎麼開、
 怎麼解析多行回應，只需要照下面「API 端點」與「Arduino 指令表」呼叫 HTTP API 就好。
 
 ## 系統架構
 
 ```
-PC / 網頁控制端
-        │  HTTP API
-        ▼
-Raspberry Pi (Flask, port 5000)   ← 這個 repo，你在這裡看的是它的 API
-        │  Serial over USB (115200)
-        ▼
-Arduino Mega 2560（天車機構：X/Y/Z 滑台、旋轉、傾角）
+PC：Motion Control Center (port 5001) + Beszel hub (port 8090)
+        │  HTTP API                         ▲ WebSocket（健康資料，選用）
+        ▼                                   │
+Raspberry Pi ── docker compose ─────────────┼───────────────────────────
+  ├── arduino-controller (Flask, port 5000)  ← 這個 repo：API + 本機網頁
+  │       │  Serial over USB (115200)       │
+  │       ▼                                 │
+  │   Arduino Nano（X/Y/Z 滑台、旋轉、傾角）
+  └── beszel-agent（選用，回報 CPU / 記憶體 / 溫度）
 ```
+
+### 檔案結構
+
+```
+app.py               Flask：API 端點 + 本機網頁路由，序列埠協定處理
+commands.py          韌體指令表（按鈕、逾時、Home all 順序）——PC 與本機網頁都從 /api/commands 讀它
+templates/index.html 本機網頁（英文介面）
+static/style.css     樣式（PC 控制中心樣式的複本，兩邊外觀一致）
+static/app.js        本機網頁的前端邏輯
+tests/               pytest，用假的序列埠模擬韌體
+docker-compose.yml   arduino-controller + 選用的 beszel-agent
+.github/workflows/   CI：跑測試、build arm64/amd64 image 推到 GHCR
+.env.example         每台 Pi 的設定範本
+```
+
+> 多台 Pi 建議用 PC 專案的 Ansible（`../pc-led-controller/deploy/ansible/`）一次部署，
+> 見「部署到多台 Pi」。下面的手動步驟適合單台或除錯。
 
 ---
 
@@ -26,7 +55,7 @@ Arduino Mega 2560（天車機構：X/Y/Z 滑台、旋轉、傾角）
 ### 需要的硬體
 
 - Raspberry Pi（3B+ 或更新）
-- Arduino（Nano 或 Uno）
+- Arduino Nano（每台 Pi 接一片）
 - USB 線連接 Pi 和 Arduino
 - Pi 與 PC 在同一個區域網路
 
@@ -80,8 +109,8 @@ sudo docker compose logs -f
 啟動成功的話，日誌會出現：
 
 ```
-[pi-001] Connecting to Arduino on /dev/ttyUSB0 at 115200...
-[pi-001] Arduino Connected!
+[pi-01] Connecting to Arduino on /dev/ttyUSB0 at 115200...
+[pi-01] Arduino Connected!
 ```
 
 ### 替代方案：不用 Docker 直接執行
@@ -94,7 +123,13 @@ pip3 install -r requirements.txt
 # 需要序列埠權限，加完要重新登入才生效
 sudo usermod -a -G dialout $USER
 
-PI_ID=pi-001 python3 app.py
+PI_ID=pi-01 python3 app.py
+```
+
+在 Windows PC 上開發測試也可以這樣跑，序列埠填 COM 名稱（裝置管理員 → 連接埠）：
+
+```powershell
+$env:SERIAL_PORT="COM3"; $env:PI_ID="pi-test"; python app.py
 ```
 
 > 直接執行時**不會讀 `.env` 檔**（那是 Docker Compose 的功能）。
@@ -109,11 +144,15 @@ PI_ID=pi-001 python3 app.py
 
 | 變數 | 說明 | 預設值 |
 |---|---|---|
-| `PI_ID` | 這台 Pi 的識別碼。多台務必各自不同，且要跟 PC 端新增裝置時填的「裝置 ID」一致 | `pi-001` |
+| `PI_ID` | 這台 Pi 的識別碼。多台務必各自不同，且要跟 PC 端新增裝置時填的 Device ID 一致（健康監控也用它當名稱） | `pi-001`（`.env.example` 範例為 `pi-01`） |
 | `SERIAL_PORT` | Arduino 接在哪個序列埠 | `/dev/ttyUSB0` |
 | `BAUD_RATE` | 鮑率，必須與 Arduino 韌體 `Serial.begin()` 的數字一致 | `115200` |
 | `HOST_PORT` | 對外開放的連接埠，PC 端連這個（**僅 Docker 有效**） | `5000` |
-| `COMMAND_TIMEOUT` | 單一指令最長容許耗時（秒）。天車韌體的校正/歸位指令是阻塞的，真機低速模式單趟可能超過 30 秒 | `130` |
+| `COMMAND_TIMEOUT` | 單一指令最長容許耗時（秒）。天車韌體的校正/歸位指令是阻塞的，真機低速模式單趟可能超過 30 秒。PC 控制中心從 `/api/status` 讀這個值，不用在 PC 端另外設定 | `130` |
+| `MAX_COMMAND_TIMEOUT` | 單一請求的 `timeout` 欄位上限（秒） | `300` |
+| `PI_IMAGE` | 選用。用 CI 建好的 image（例如 `ghcr.io/frank931023/pi-arduino-connection-test-0717:main`）取代在 Pi 上 build | 空（在 Pi 上 build） |
+| `COMPOSE_PROFILES` | 選用。設成 `monitoring` 才會一併啟動 beszel-agent | 空（不啟動） |
+| `BESZEL_HUB_URL` / `BESZEL_KEY` / `BESZEL_TOKEN` | 選用。健康監控用，直接複製 PC 控制中心 **⚙** 給的值，見「健康監控」 | 空 |
 
 改完重啟即可生效：
 
@@ -137,10 +176,16 @@ git pull && sudo docker compose up -d --build
 ls -l /dev/serial/by-id/
 ```
 
-- Arduino Nano（CH340 晶片）通常是 `/dev/ttyUSB0`
-- Arduino Uno / 原廠 Nano 通常是 `/dev/ttyACM0`
+- **建議直接填 by-id 的完整路徑**（例如 `/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0`）：
+  拔插或多接一個 USB 裝置時不會變號
+- 或填 tty 名稱：Arduino Nano（CH340 或 FTDI 晶片，也就是一般的 Nano）通常是 `/dev/ttyUSB0`，
+  Nano Every / Nano 33 系列（原生 USB）通常是 `/dev/ttyACM0`
 
-**只需要改 `SERIAL_PORT` 一個地方**——USB 裝置映射（`devices:`）和程式開啟的埠都由它決定，不會有只改到一邊的問題。
+`docker-compose.yml` 掛的是整個 `/dev`（不是用 `devices:` 映射單一裝置），再用 `device_cgroup_rules`
+只放行 USB 序列埠（`ttyUSB*`、`ttyACM*`）。所以：
+
+- 沒接 Arduino 時容器照樣啟動（`devices:` 遇到不存在的裝置會讓容器根本起不來）
+- 拔掉重插、編號從 `ttyUSB0` 變 `ttyUSB1` 都不用重建容器，改 `.env` 再 `docker compose up -d` 即可
 
 ---
 
@@ -200,7 +245,31 @@ Pi 端的 `send_command()` 是照這份協定實作的，網頁/PC 控制端不�
 
 ## API 端點
 
-所有回應都是 JSON，且都含 `pi_id` 欄位。
+所有 `/api/` 回應都是 JSON，且都含 `pi_id` 欄位。
+
+> `GET /` 是本機網頁（HTML），不是 API。它用的也是下面這些端點。
+
+### `GET /api/health`
+
+程序存活檢查，**不碰序列埠**，所以永遠很快回 200（Docker healthcheck、Ansible 用）。
+沒接 Arduino 時一樣是 200——Flask 本身沒問題。
+
+```json
+{ "status": "success", "pi_id": "pi-01", "app_version": "main@1a2b3c4" }
+```
+
+### `GET /api/commands`
+
+韌體指令表（`commands.py`），PC 控制中心與本機網頁都用它產生按鈕，**改韌體指令只要改 `commands.py`**。
+每個指令的 `timeout` 都已填好：沒特別指定的（校正、歸位、移動）就是 `COMMAND_TIMEOUT`。
+
+```json
+{ "status": "success", "pi_id": "pi-01", "default_timeout": 130,
+  "home_sequence": ["SXH", "SYH", "SZH", "RH"],
+  "groups": [ { "title": "X Axis", "range": "0 – 1000 mm",
+                "actions": [ { "cmd": "SXC", "label": "Calibrate", "timeout": 130 }, ... ],
+                "move": { "prefix": "SXM", "label": "Move", "unit": "mm", "timeout": 130 } }, ... ] }
+```
 
 ### `GET /api/status`
 
@@ -209,7 +278,17 @@ Pi 端的 `send_command()` 是照這份協定實作的，網頁/PC 控制端不�
 **這個端點永遠回 200**（只要 Flask 活著），Arduino 的死活看 `arduino_status` 欄位。
 
 ```json
-{ "status": "success", "pi_id": "pi-001", "arduino_status": "connected" }
+{ "status": "success", "pi_id": "pi-01", "arduino_status": "connected", "rig_name": "Ceiling Rig Front",
+  "app_version": "main@1a2b3c4", "command_timeout": 130, "max_command_timeout": 300 }
+```
+
+`command_timeout` / `max_command_timeout` / `app_version` 每次都會回，PC 控制中心用它們決定逾時、顯示版本。
+
+**有指令正在跑時**（不論誰送的）不會去碰序列埠，立刻回 `busy` 和正在跑的指令：
+
+```json
+{ "status": "success", "pi_id": "pi-01", "arduino_status": "busy",
+  "running": { "command": "SXC", "seconds": 12.4 }, ... }
 ```
 
 Arduino 有問題時多帶一個 `arduino_error`，直接告訴你是哪一種：
@@ -217,7 +296,7 @@ Arduino 有問題時多帶一個 `arduino_error`，直接告訴你是哪一種�
 ```json
 {
   "status": "success",
-  "pi_id": "pi-001",
+  "pi_id": "pi-01",
   "arduino_status": "disconnected",
   "arduino_error": "TIMEOUT_NO_TERMINAL"
 }
@@ -228,7 +307,7 @@ Arduino 有問題時多帶一個 `arduino_error`，直接告訴你是哪一種�
 ```json
 {
   "status": "success",
-  "pi_id": "pi-001",
+  "pi_id": "pi-01",
   "arduino_status": "connected",
   "rig_name": "Ceiling Rig Front",
   "heartbeat": { "millis": 12000, "arduino_state": "IDLE", "seconds_ago": 1.8 }
@@ -246,6 +325,7 @@ Arduino 有問題時多帶一個 `arduino_error`，直接告訴你是哪一種�
 > 韌體沒燒錄或 `BAUD_RATE` 設錯時，埠一樣開得成功、Arduino 卻永遠不回話——
 > 只檢查 `is_open` 的話 PC 會顯示綠燈，燈卻不會亮。
 > 代價是 PC 每次輪詢（預設 5 秒）都會產生一次序列埠往返，對 Arduino 來說微不足道。
+> 這次查詢最多等 3 秒，所以指令要排隊也只會被它擋住幾秒。
 
 ### `GET|POST /api/ping`
 
@@ -255,7 +335,7 @@ Arduino 有問題時多帶一個 `arduino_error`，直接告訴你是哪一種�
 ```json
 {
   "status": "success",
-  "pi_id": "pi-001",
+  "pi_id": "pi-01",
   "rig_name": "Ceiling Rig Front",
   "arduino_response": ["Ceiling Rig Front", "DONE"]
 }
@@ -263,8 +343,10 @@ Arduino 有問題時多帶一個 `arduino_error`，直接告訴你是哪一種�
 
 **Arduino 沒接／沒回應 503：**
 ```json
-{ "status": "error", "pi_id": "pi-001", "error": "SERIAL_DISCONNECTED" }
+{ "status": "error", "pi_id": "pi-01", "error": "SERIAL_DISCONNECTED" }
 ```
+
+**有指令正在跑 409**（格式同下方 `/api/command` 的 409）。
 
 ### `POST /api/command`
 
@@ -275,7 +357,7 @@ Content-Type: application/json
 { "command": "SXM,500" }
 ```
 
-可選的 `timeout` 欄位（秒）覆蓋預設的 `COMMAND_TIMEOUT`，真機校正類指令建議拉長：
+可選的 `timeout` 欄位（秒，大於 0、最多 `MAX_COMMAND_TIMEOUT`）覆蓋預設的 `COMMAND_TIMEOUT`：
 
 ```
 Content-Type: application/json
@@ -286,7 +368,7 @@ Content-Type: application/json
 ```json
 {
   "status": "success",
-  "pi_id": "pi-001",
+  "pi_id": "pi-01",
   "command": "SXM,500",
   "arduino_result": "DONE",
   "arduino_response": ["Calling move x", "Max Travel = 10001", "moving toward: 5000", "DONE"]
@@ -298,7 +380,11 @@ Content-Type: application/json
 執行，要掃描 `arduino_response` 裡的訊息行（例如超出行程時韌體仍以 `DONE` 收尾，
 但中間會有 `Exceeded Max travel.` 這一行）。
 
-**400**：body 無效、`command` 是空的，或 `timeout` 不是數字
+**400**：body 無效、`command` 是空的、含換行或超過 64 字元，或 `timeout` 不是數字／超出範圍
+**409**：另一個指令還在跑（不會排隊，立刻回）：
+```json
+{ "status": "error", "pi_id": "pi-01", "error": "BUSY", "running": { "command": "SXC", "seconds": 12.4 } }
+```
 **503**：Arduino 斷線或逾時（見上方 `arduino_error` 表）
 
 ### 狀態碼一覽
@@ -307,9 +393,10 @@ Content-Type: application/json
 |---|---|
 | `200` | 指令送達 Arduino，且收到 `DONE`/`ERR` 收尾（`ERR` 是韌體不認得指令，不是連線問題） |
 | `400` | 請求本身有問題（body 無效、參數缺失或格式錯） |
+| `409` | 這台 Pi 正在跑另一個指令（`running` 欄位說明是哪一個） |
 | `503` | Flask 活著，但 Arduino 連不上、沒回應，或逾時 |
 
-**`503` 是刻意的設計。** Arduino 被拔掉時如果照樣回 200，PC 端會顯示綠燈「連線正常」，但燈根本不會亮——這種「壞掉卻不出聲」的狀況最難 debug。現在 Arduino 一斷，PC 端立刻顯示黃色的「Arduino 未接」。
+**`503` 是刻意的設計。** Arduino 被拔掉時如果照樣回 200，PC 端會顯示綠燈「連線正常」，但燈根本不會亮——這種「壞掉卻不出聲」的狀況最難 debug。現在 Arduino 一斷，PC 端立刻顯示黃色的 **No Arduino**。
 
 ---
 
@@ -330,15 +417,54 @@ Content-Type: application/json
 它的 `/api/pi/<id>/command`、`/api/pi/<id>/test` 分別轉發到這裡的 `/api/command`、`/api/ping`。
 它的後端是直接把 Pi 的整包 JSON 包成 `pi_response` 原樣轉發，不會因為欄位改變而直接 500。
 
-> **狀態：已對接完成。** `pc-led-controller` 已經移除亮度滑桿與 `/api/pi/<id>/brightness`
-> （原本轉發到這裡已經 404 的 `/api/set_brightness`），改成一整排對應本文件「指令表」的
-> 天車指令按鈕（X/Y/Z 校正／歸位／查詢位置／移動＋旋轉＋傾角），每顆按鈕旁邊都標示對照
-> LED 模擬版韌體的預期燈號反應，並正確處理 `arduino_response` 是陣列、`arduino_result`
-> 分 `DONE`/`ERR` 這些新格式。細節見 `../pc-led-controller/README.md`。
+> **狀態：已對接完成。** `pc-led-controller`（現名 Motion Control Center）已經移除亮度滑桿與
+> `/api/pi/<id>/brightness`，改成一整排對應本文件「指令表」的按鈕（X/Y/Z Calibrate／Home／Position／Move、
+> Rotation、Tilt、LED Test、自訂指令），並正確處理 `arduino_response` 是陣列、`arduino_result` 分
+> `DONE`/`ERR`、超出行程時仍回 `DONE` 這些格式。按鈕與逾時從 `/api/commands` 讀取，`arduino_status: "busy"`
+> 與 `409` 顯示成 **Busy**。細節見 `../pc-led-controller/README.md`。
+
+---
+
+## 健康監控（選用，Beszel agent）
+
+PC 端控制中心內建 [Beszel](https://github.com/henrygd/beszel) hub，可以在控制中心網頁上直接看到每台 Pi 的
+CPU、記憶體、磁碟、溫度、運行時間，點進去還有歷史圖表與告警。每台 Pi 只需要跑一個很小的 agent（約 4 MB）。
+
+`docker-compose.yml` 已經包含 `beszel-agent` 服務，但**預設不啟動**（放在 `monitoring` profile 裡）。啟用方式：
+
+1. 在 PC 控制中心網頁左側點 **⚙（Monitoring setup）**，複製它給的四行
+   （`COMPOSE_PROFILES`、`BESZEL_HUB_URL`、`BESZEL_KEY`、`BESZEL_TOKEN`）
+2. 貼到這台 Pi 的 `.env`，並確認 **`PI_ID` 跟 PC 端的 Device ID 一樣**（例如 `pi-01`）——
+   agent 在 Beszel 裡的名稱就是 `PI_ID`，控制中心靠這個名稱對應裝置
+3. 套用：
+
+```bash
+git pull
+docker compose up -d        # 會一併啟動 beszel-agent
+docker compose logs beszel-agent | tail   # 看到 "WebSocket connected" 就成功了
+```
+
+幾秒內控制中心網頁那台裝置就會出現 **Health** 區塊。
+
+- agent 是**主動連到 PC** 的（WebSocket），PC 不需要連進 Pi；但 Pi 必須連得到 PC 的 `8090` 埠
+  （Windows PC 記得在防火牆開放 8090，見 PC 端 README）。
+- agent 用 `network_mode: host` 才讀得到 Pi 本身的網路流量，並以唯讀方式掛 `docker.sock`，
+  所以 Beszel 也會顯示這台 Pi 上每個容器（包含 Arduino 控制服務）的資源用量。
+- 不想監控某台 Pi：`.env` 不加那四行即可，`docker compose up -d` 只會啟動 Arduino 服務。
 
 ---
 
 ## 部署到多台 Pi
+
+### 推薦：Ansible
+
+PC 專案的 `deploy/ansible/` 會對 inventory 裡的每台 Pi：裝 Docker → 取得程式碼（或拉 image）→ 自動找出
+Arduino 的序列埠 → 產生 `.env`（含健康監控設定）→ 啟動 → 等健康檢查通過 → 註冊到 PC 控制中心。
+可以重複執行，沒有變更時什麼都不會動。見 `../pc-led-controller/deploy/ansible/README.md`。
+
+> 每台新 Pi 還是要先確認容器網路正常（「步驟 1」的 1a 與 1d：Raspberry Pi OS trixie 要先裝 iptables）。
+
+### 手動
 
 每台的步驟完全一樣，只有 `.env` 內容不同。**每台新 Pi 都要先做一次「步驟 1：準備 Pi 環境」**（裝 iptables + 官方 Docker），再跑下面的部署：
 
@@ -351,42 +477,43 @@ sudo docker compose up -d
 
 **Pi 1** 的 `.env`：
 ```ini
-PI_ID=pi-001
+PI_ID=pi-01
 SERIAL_PORT=/dev/ttyUSB0
 ```
 
-**Pi 2** 的 `.env`（這台插的是 Arduino Uno）：
+**Pi 2** 的 `.env`（假設這台的 Nano 出現在 `ttyACM0`，例如 Nano Every）：
 ```ini
-PI_ID=pi-002
+PI_ID=pi-02
 SERIAL_PORT=/dev/ttyACM0
 ```
 
-然後在 PC 控制中心新增裝置，**裝置 ID 要跟該台的 `PI_ID` 一致**：
+然後在 PC 控制中心新增裝置，**Device ID 要跟該台的 `PI_ID` 一致**（健康監控也靠它對應）：
 
-| 裝置 ID | 位址 |
+| Device ID | 位址 |
 |---|---|
-| `pi-001` | `192.168.1.100:5000` |
-| `pi-002` | `192.168.1.101:5000` |
+| `pi-01` | `192.168.1.100:5000` |
+| `pi-02` | `192.168.1.101:5000` |
+
+要啟用健康監控，再把 PC 控制中心 **⚙** 給的四行加到每台的 `.env`，見「健康監控」。
 
 ### 用預先建好的 image 部署
 
-不想在每台 Pi 上 build 的話：
+push 到 `main` 時，GitHub Actions（`.github/workflows/image.yml`）會先跑測試，再 build arm64 + amd64
+image 推到 GHCR：`:main`（最新）、`:sha-<commit>`（固定版本）、`:v1.2.3`（打 tag 時）。
+image 裡帶著版本號（`APP_VERSION`），PC 控制中心會顯示每台 Pi 跑的是哪一版。
 
-```bash
-# 在開發機上建好並推上去（Pi 是 ARM，平台要指定）
-docker buildx build --platform linux/arm64 -t <registry>/pi-arduino:latest --push .
+每台 Pi 的 `.env` 加一行，之後更新只要 pull：
 
-# 每台 Pi 上
-docker run -d --name pi-arduino-controller --restart unless-stopped \
-  --env-file .env \
-  --device /dev/ttyUSB0:/dev/ttyUSB0 \
-  -p 5000:5000 \
-  <registry>/pi-arduino:latest
+```ini
+PI_IMAGE=ghcr.io/frank931023/pi-arduino-connection-test-0717:main
 ```
 
-> ⚠️ `docker run` 的 `--device` **不會**讀 `.env` 裡的 `SERIAL_PORT`，得自己填成一致的值。
-> 填錯會變成「程式開 `ttyACM0`、但映射進去的是 `ttyUSB0`」這種很難查的狀況。
-> `docker compose` 會自動展開變數，沒有這個問題——所以還是推薦 compose。
+```bash
+docker compose pull && docker compose up -d
+```
+
+> GHCR 的 package 預設是 private：到 GitHub → Packages → 該 image → Package settings 改成 public，
+> 或在每台 Pi 上先 `docker login ghcr.io`。
 
 `.env` 已列入 `.dockerignore`，不會被打包進 image，設定與 image 是分離的。
 
@@ -394,8 +521,18 @@ docker run -d --name pi-arduino-controller --restart unless-stopped \
 
 ## 測試
 
+**自動測試**（不需要 Arduino，用假的序列埠模擬韌體：心跳過濾、desync 恢復、busy、輸入驗證）：
+
+```bash
+pip install -r requirements.txt pytest
+python -m pytest
+```
+
+**手動測試**：
+
 ```bash
 # 在 Pi 本機
+curl http://localhost:5000/api/health
 curl http://localhost:5000/api/status
 curl http://localhost:5000/api/ping
 curl -X POST http://localhost:5000/api/command \
@@ -415,15 +552,15 @@ curl http://192.168.1.100:5000/api/ping
 error gathering device information ... /dev/ttyUSB0: no such file or directory
 ```
 
-Docker 在**啟動前**就要找到 `devices:` 指定的裝置。確認：
+這是**舊版** `docker-compose.yml`（用 `devices:` 映射單一裝置）才會有的錯誤：裝置不存在時容器根本起不來。
+`git pull` 拿到新版（掛整個 `/dev`）後，沒接 Arduino 也能啟動，狀態會顯示 No Arduino。
 
-```bash
-ls -la /dev/tty*          # Arduino 真的在嗎？是 USB0 還是 ACM0？
-```
+### 在 Windows PC 上 `docker compose up` 後一直是 No Arduino
 
-對不上就改 `.env` 的 `SERIAL_PORT`，然後 `sudo docker compose up -d`。
+正常。Docker Desktop 不能把 Windows 的 COM 埠交給容器，容器裡看不到 Arduino，但 API 和網頁都能用來開發。
+要在 PC 上接真的 Arduino 測試，改用「不用 Docker 直接執行」，`SERIAL_PORT` 填 `COM3` 之類的名稱。
 
-### 日誌顯示 `Error connecting to Serial: Permission denied`
+### 日誌顯示 `Arduino not available on ...: Permission denied`
 
 Docker 方式應該不會遇到（容器內是 root）。直接執行時：
 
@@ -432,7 +569,7 @@ sudo usermod -a -G dialout $USER
 # 重新登入才會生效
 ```
 
-### API 回 503 / PC 端顯示「🟡 Arduino 未接」
+### API 回 503 / PC 端顯示「🟡 No Arduino」
 
 代表 Flask 正常但序列埠不通。依序檢查：
 
@@ -586,6 +723,13 @@ sudo systemctl restart docker
 - **`ERR` 不等於連線失敗**：韌體看不懂指令會回 `ERR: <原指令>`，但連線本身正常，所以 HTTP 狀態仍是 200（用 `arduino_result` 欄位分辨），503 只保留給真正的連線問題。
 - **斷線回 503 而非 200**：理由見上方「狀態碼一覽」。
 - **序列埠會自動重連**：連線失敗不會讓 Flask 掛掉，之後每 5 秒最多重試一次（避免每個請求都卡在重連上）。
+- **同一時間只跑一個指令，第二個立刻 409**：序列埠鎖只保證不交錯；沒有這層的話，第二個指令會排隊等前一個
+  130 秒的校正，呼叫端多半先逾時。`/api/status` 也看這個狀態：有指令在跑就回 `busy`、不去搶序列埠，
+  PC 才不會因為等不到回應而把正在工作的 Pi 誤判成離線。
+- **指令表放在 Pi**：韌體跟著 Pi 走，所以按鈕、逾時、Home all 順序由 Pi 的 `/api/commands` 提供，
+  PC 與本機網頁不再各自維護一份（以前兩份 `app.js` 要同步改）。
+- **gunicorn 只能 1 個 worker**：序列埠握把和指令鎖都在程序記憶體裡，多個 worker 會各自開序列埠、各自上鎖。
+  並行靠 `--threads`。
 - **`request.get_json(silent=True)` 而非 `request.json`**：Flask 2.3 的 `request.json` 在 Content-Type 不是 JSON 時會直接拋 415，`request.json or request.form` 這種寫法的 form 分支永遠輪不到執行。
 
 ---
