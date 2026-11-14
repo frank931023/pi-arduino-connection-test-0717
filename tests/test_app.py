@@ -3,11 +3,15 @@ Tests for the Pi API with a fake serial port standing in for the Arduino firmwar
 
 Run:  pip install -r requirements.txt pytest && python -m pytest
 """
+import os
+import subprocess
+import sys
 import threading
 
 import pytest
 
 import app as pi
+import commands
 
 
 class FakeSerial:
@@ -149,6 +153,7 @@ def test_status_reports_timeouts_and_version(client, monkeypatch):
     assert body['command_timeout'] == pi.COMMAND_TIMEOUT
     assert body['max_command_timeout'] == pi.MAX_COMMAND_TIMEOUT
     assert body['app_version'] == pi.APP_VERSION
+    assert body['board'] == 'mega'
 
 
 def test_command_catalog_has_every_timeout_filled_in(client):
@@ -158,3 +163,26 @@ def test_command_catalog_has_every_timeout_filled_in(client):
     calibrate = next(a for a in body['groups'][0]['actions'] if a['cmd'] == 'SXC')
     assert calibrate['timeout'] == pi.COMMAND_TIMEOUT
     assert body['home_sequence'] == ['SXH', 'SYH', 'SZH', 'RH']
+    assert body['board'] == 'mega'
+
+
+def test_board_picks_the_catalog(client, monkeypatch):
+    monkeypatch.setattr(pi, 'BOARD', 'uno')
+    body = client.get('/api/commands').get_json()
+    assert body['board'] == 'uno' and body['board_label'] == 'Arduino Uno'
+    assert 'Z Axis' not in [g['title'] for g in body['groups']]
+    assert client.get('/api/health').get_json()['board'] == 'uno'
+
+
+@pytest.mark.parametrize('board', list(commands.BOARDS))
+def test_home_sequence_only_uses_commands_the_board_has(board):
+    spec = commands.BOARDS[board]
+    available = {a['cmd'] for g in spec['groups'] for a in g['actions']}
+    assert set(spec['home_sequence']) <= available
+
+
+def test_unknown_board_refuses_to_start():
+    env = {**os.environ, 'BOARD': 'nano', 'SERIAL_PORT': 'no-such-port'}
+    result = subprocess.run([sys.executable, '-c', 'import app'], env=env, capture_output=True, text=True,
+                            cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    assert result.returncode != 0 and "BOARD='nano' is not supported" in result.stderr

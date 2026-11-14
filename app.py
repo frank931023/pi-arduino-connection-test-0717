@@ -34,6 +34,11 @@ app = Flask(__name__)
 PORT = os.getenv('SERIAL_PORT', '/dev/ttyUSB0')
 BAUD_RATE = int(os.getenv('BAUD_RATE', '115200'))
 PI_ID = os.getenv('PI_ID', 'pi-001')  # 用於識別不同的 Raspberry Pi
+# 這台 Pi 接的 Arduino 是哪一種板子，決定 /api/commands 給哪一份指令表（見 commands.py）。
+# 設錯值直接拒絕啟動：靜靜退回預設值的話，Uno 會顯示一堆它根本沒有的軸。
+BOARD = os.getenv('BOARD', 'mega').strip().lower()
+if BOARD not in commands.BOARDS:
+    raise RuntimeError(f"BOARD={BOARD!r} is not supported; use one of: {', '.join(commands.BOARDS)}")
 APP_VERSION = os.getenv('APP_VERSION', 'dev')  # image build 時寫入（git commit），PC 端顯示用
 # 單一指令最長容許耗時。真機校正是低速模式,走完整個行程單趟可能超過 30 秒,
 # 所以預設值要比模擬版(數秒)寬鬆很多,個別請求仍可用 `timeout` 欄位覆蓋。
@@ -258,7 +263,8 @@ def busy_response(job):
 @app.route('/')
 def index():
     """單台 Pi 的本機網頁（英文介面、風格同 PC 控制中心）。日常操作請用 PC 控制中心。"""
-    return render_template('index.html', pi_id=PI_ID, serial_port=PORT, baud_rate=BAUD_RATE,
+    return render_template('index.html', pi_id=PI_ID, board_label=commands.BOARDS[BOARD]['label'],
+                           serial_port=PORT, baud_rate=BAUD_RATE,
                            command_timeout=COMMAND_TIMEOUT, app_version=APP_VERSION,
                            v=ASSET_VERSION)
 
@@ -268,13 +274,13 @@ def index():
 @app.route('/api/health', methods=['GET'])
 def health():
     """程序存活檢查（Docker healthcheck / Ansible 用）。不碰序列埠，所以永遠很快。"""
-    return ok(app_version=APP_VERSION)
+    return ok(app_version=APP_VERSION, board=BOARD)
 
 
 @app.route('/api/commands', methods=['GET'])
 def command_catalog():
     """韌體指令表，PC 控制中心與本機網頁都用它產生按鈕（見 commands.py）。"""
-    return ok(**commands.catalog(COMMAND_TIMEOUT))
+    return ok(**commands.catalog(BOARD, COMMAND_TIMEOUT))
 
 
 @app.route('/api/status', methods=['GET'])
@@ -293,6 +299,7 @@ def status():
     """
     body = {
         "app_version": APP_VERSION,
+        "board": BOARD,
         "command_timeout": COMMAND_TIMEOUT,
         "max_command_timeout": MAX_COMMAND_TIMEOUT,
     }

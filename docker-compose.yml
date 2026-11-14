@@ -28,6 +28,7 @@ services:
     # 所以這個檔案在每台 Pi 上都一模一樣，git pull 不會衝突。
     environment:
       - PI_ID=${PI_ID:-pi-001}
+      - BOARD=${BOARD:-mega}
       - SERIAL_PORT=${SERIAL_PORT:-/dev/ttyUSB0}
       - BAUD_RATE=${BAUD_RATE:-115200}
       - COMMAND_TIMEOUT=${COMMAND_TIMEOUT:-130}

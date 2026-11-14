@@ -27,7 +27,7 @@ Raspberry Pi ── docker compose ─────────────┼─
   ├── arduino-controller (Flask, port 5000)  ← 這個 repo：API + 本機網頁
   │       │  Serial over USB (115200)       │
   │       ▼                                 │
-  │   Arduino Nano（X/Y/Z 滑台、旋轉、傾角）
+  │   Arduino Mega（X/Y/Z 滑台、旋轉、傾角）或 Uno（較少軸）
   └── beszel-agent（選用，回報 CPU / 記憶體 / 溫度）
 ```
 
@@ -35,7 +35,7 @@ Raspberry Pi ── docker compose ─────────────┼─
 
 ```
 app.py               Flask：API 端點 + 本機網頁路由，序列埠協定處理
-commands.py          韌體指令表（按鈕、逾時、Home all 順序）——PC 與本機網頁都從 /api/commands 讀它
+commands.py          韌體指令表（按鈕、逾時、Home all 順序，依 BOARD 分 Mega / Uno）——PC 與本機網頁都從 /api/commands 讀它
 templates/index.html 本機網頁（英文介面）
 static/style.css     樣式（PC 控制中心樣式的複本，兩邊外觀一致）
 static/app.js        本機網頁的前端邏輯
@@ -55,7 +55,7 @@ docker-compose.yml   arduino-controller + 選用的 beszel-agent
 ### 需要的硬體
 
 - Raspberry Pi（3B+ 或更新）
-- Arduino Nano（每台 Pi 接一片）
+- Arduino Mega 2560 或 Uno（每台 Pi 接一片，`.env` 的 `BOARD` 要填對）
 - USB 線連接 Pi 和 Arduino
 - Pi 與 PC 在同一個區域網路
 
@@ -145,6 +145,7 @@ $env:SERIAL_PORT="COM3"; $env:PI_ID="pi-test"; python app.py
 | 變數 | 說明 | 預設值 |
 |---|---|---|
 | `PI_ID` | 這台 Pi 的識別碼。多台務必各自不同，且要跟 PC 端新增裝置時填的 Device ID 一致（健康監控也用它當名稱） | `pi-001`（`.env.example` 範例為 `pi-01`） |
+| `BOARD` | 這台 Pi 接的 Arduino：`mega` 或 `uno`。決定 `/api/commands` 給哪一份指令表（網頁顯示哪些軸），見 `commands.py` 的 `BOARDS`。填其他值服務會拒絕啟動 | `mega` |
 | `SERIAL_PORT` | Arduino 接在哪個序列埠 | `/dev/ttyUSB0` |
 | `BAUD_RATE` | 鮑率，必須與 Arduino 韌體 `Serial.begin()` 的數字一致 | `115200` |
 | `HOST_PORT` | 對外開放的連接埠，PC 端連這個（**僅 Docker 有效**） | `5000` |
@@ -178,8 +179,8 @@ ls -l /dev/serial/by-id/
 
 - **建議直接填 by-id 的完整路徑**（例如 `/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0`）：
   拔插或多接一個 USB 裝置時不會變號
-- 或填 tty 名稱：Arduino Nano（CH340 或 FTDI 晶片，也就是一般的 Nano）通常是 `/dev/ttyUSB0`，
-  Nano Every / Nano 33 系列（原生 USB）通常是 `/dev/ttyACM0`
+- 或填 tty 名稱：正版 Uno / Mega（16U2 晶片）通常是 `/dev/ttyACM0`，
+  CH340 晶片的副廠板通常是 `/dev/ttyUSB0`
 
 `docker-compose.yml` 掛的是整個 `/dev`（不是用 `devices:` 映射單一裝置），再用 `device_cgroup_rules`
 只放行 USB 序列埠（`ttyUSB*`、`ttyACM*`）。所以：
@@ -255,16 +256,17 @@ Pi 端的 `send_command()` 是照這份協定實作的，網頁/PC 控制端不�
 沒接 Arduino 時一樣是 200——Flask 本身沒問題。
 
 ```json
-{ "status": "success", "pi_id": "pi-01", "app_version": "main@1a2b3c4" }
+{ "status": "success", "pi_id": "pi-01", "app_version": "main@1a2b3c4", "board": "mega" }
 ```
 
 ### `GET /api/commands`
 
 韌體指令表（`commands.py`），PC 控制中心與本機網頁都用它產生按鈕，**改韌體指令只要改 `commands.py`**。
 每個指令的 `timeout` 都已填好：沒特別指定的（校正、歸位、移動）就是 `COMMAND_TIMEOUT`。
+內容依 `BOARD` 而定：Mega 是完整的天車（X / Y / Z / 旋轉 / 傾斜），Uno 只有它韌體有的軸。
 
 ```json
-{ "status": "success", "pi_id": "pi-01", "default_timeout": 130,
+{ "status": "success", "pi_id": "pi-01", "board": "mega", "board_label": "Arduino Mega 2560", "default_timeout": 130,
   "home_sequence": ["SXH", "SYH", "SZH", "RH"],
   "groups": [ { "title": "X Axis", "range": "0 – 1000 mm",
                 "actions": [ { "cmd": "SXC", "label": "Calibrate", "timeout": 130 }, ... ],
@@ -279,10 +281,10 @@ Pi 端的 `send_command()` 是照這份協定實作的，網頁/PC 控制端不�
 
 ```json
 { "status": "success", "pi_id": "pi-01", "arduino_status": "connected", "rig_name": "Ceiling Rig Front",
-  "app_version": "main@1a2b3c4", "command_timeout": 130, "max_command_timeout": 300 }
+  "app_version": "main@1a2b3c4", "board": "mega", "command_timeout": 130, "max_command_timeout": 300 }
 ```
 
-`command_timeout` / `max_command_timeout` / `app_version` 每次都會回，PC 控制中心用它們決定逾時、顯示版本。
+`command_timeout` / `max_command_timeout` / `app_version` / `board` 每次都會回，PC 控制中心用它們決定逾時、顯示版本。
 
 **有指令正在跑時**（不論誰送的）不會去碰序列埠，立刻回 `busy` 和正在跑的指令：
 
@@ -475,17 +477,21 @@ nano .env
 sudo docker compose up -d
 ```
 
-**Pi 1** 的 `.env`：
+**Pi 1** 的 `.env`（接 Mega）：
 ```ini
 PI_ID=pi-01
-SERIAL_PORT=/dev/ttyUSB0
-```
-
-**Pi 2** 的 `.env`（假設這台的 Nano 出現在 `ttyACM0`，例如 Nano Every）：
-```ini
-PI_ID=pi-02
+BOARD=mega
 SERIAL_PORT=/dev/ttyACM0
 ```
+
+**Pi 2** 的 `.env`（接 Uno）：
+```ini
+PI_ID=pi-02
+BOARD=uno
+SERIAL_PORT=/dev/ttyACM0
+```
+
+> 正版 Uno / Mega 通常是 `/dev/ttyACM0`，CH340 晶片的副廠板是 `/dev/ttyUSB0`。
 
 然後在 PC 控制中心新增裝置，**Device ID 要跟該台的 `PI_ID` 一致**（健康監控也靠它對應）：
 
